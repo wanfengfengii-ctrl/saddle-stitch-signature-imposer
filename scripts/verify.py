@@ -11,6 +11,11 @@
    ``creep_mm``）；传入后每张纸携带按帖独立计量的 ``creep_mm``，
    页序/补白/帖张编号不变；非法厚度整次请求 422 且字段定位到
    ``paper_thickness_mm``。
+5. 可选 ``binding_edge``：右装订时每张纸正反面的左右页位水平镜像
+   （末帖补白同样参与镜像，帖张编号与总补白数不变），与纸厚补偿组合时
+   creep 计算/舍入/跨帖归零保持原样；缺省请求响应快照不出现新字段；
+   无法识别或非字符串的装订侧整次请求 422 且字段定位到 ``binding_edge``；
+   右装订下每个正文页仍恰好出现一次。
 
 全部通过退出码为 0，任一失败退出码为 1。仅使用标准库，便于在
 slim 镜像中直接运行。
@@ -234,6 +239,165 @@ def main() -> int:
         check(
             f"{page_count} 页：补偿不改变页序、补白位置与帖张编号",
             stripped == body0,
+        )
+
+    # ===== binding_edge（装订侧）验收 =====
+
+    # 固定场景一：右装订且末帖含补白。10 页、每帖 2 张（末帖 9、10 + 6
+    # BLANK）：每张纸正反面的左右页位水平镜像，BLANK 页位同样参与镜像；
+    # 正文分帖、末尾补白、帖张编号与总补白数均不改变。
+    status, body = request(
+        "POST",
+        "/impose",
+        {"page_count": 10, "sheets_per_signature": 2, "binding_edge": "right"},
+    )
+    check("右装订（10 页 / 每帖 2 张）返回 200", status == 200, str(body))
+    check(
+        "右装订：末帖补白参与镜像，帖/张编号与总补白数不变",
+        body["total_signatures"] == 2
+        and body["total_blanks"] == 6
+        and [sig["signature"] for sig in body["signatures"]] == [1, 2]
+        and [
+            (
+                sh["front"]["left"],
+                sh["front"]["right"],
+                sh["back"]["left"],
+                sh["back"]["right"],
+            )
+            for sig in body["signatures"]
+            for sh in sig["sheets"]
+        ]
+        == [
+            (1, 8, 7, 2),
+            (3, 6, 5, 4),
+            (9, "BLANK", "BLANK", 10),
+            ("BLANK", "BLANK", "BLANK", "BLANK"),
+        ],
+        str(body),
+    )
+
+    # 固定场景二：右装订 + 纸厚补偿。先生成原有页序与逐张补偿量，再按装订侧
+    # 镜像左右页位；creep_mm 的计算、舍入与跨帖归零保持原样。
+    status, body = request(
+        "POST",
+        "/impose",
+        {
+            "page_count": 32,
+            "sheets_per_signature": 4,
+            "paper_thickness_mm": 0.125,
+            "binding_edge": "right",
+        },
+    )
+    check("右装订 + 补偿（32 页 / 每帖 4 张）返回 200", status == 200, str(body))
+    check(
+        "右装订 + 补偿：creep 跨帖归零不变",
+        [
+            [sh["creep_mm"] for sh in sig["sheets"]]
+            for sig in body["signatures"]
+        ]
+        == [[0.0, 0.25, 0.5, 0.75], [0.0, 0.25, 0.5, 0.75]],
+        str(body),
+    )
+    check(
+        "右装订 + 补偿：首帖左右页位镜像",
+        [
+            (
+                sh["front"]["left"],
+                sh["front"]["right"],
+                sh["back"]["left"],
+                sh["back"]["right"],
+            )
+            for sh in body["signatures"][0]["sheets"]
+        ]
+        == [(1, 16, 15, 2), (3, 14, 13, 4), (5, 12, 11, 6), (7, 10, 9, 8)],
+        str(body),
+    )
+
+    # 固定场景三：缺省请求的完整响应快照不得出现新字段（与旧版本逐字段一致）。
+    status, body = request(
+        "POST",
+        "/impose",
+        {"page_count": 8, "sheets_per_signature": 2},
+    )
+    check(
+        "缺省请求响应不含 binding_edge 且快照不变",
+        status == 200
+        and "binding_edge" not in body
+        and body == SNAPSHOT_8_PAGES_2_SHEETS,
+        str(body),
+    )
+    # 显式 "left" 与缺省请求的响应逐字段一致（现有调用方无需调整解析）。
+    status, body_left = request(
+        "POST",
+        "/impose",
+        {"page_count": 8, "sheets_per_signature": 2, "binding_edge": "left"},
+    )
+    check(
+        "显式 left 与缺省响应一致",
+        status == 200 and body_left == SNAPSHOT_8_PAGES_2_SHEETS,
+        str(body_left),
+    )
+
+    # 右装订下每个正文页仍恰好出现一次、补白数自洽。
+    for page_count, sheets in valid_cases:
+        status, body = request(
+            "POST",
+            "/impose",
+            {
+                "page_count": page_count,
+                "sheets_per_signature": sheets,
+                "binding_edge": "right",
+            },
+        )
+        check(
+            f"右装订 {page_count} 页 / 每帖 {sheets} 张返回 200",
+            status == 200,
+            str(body),
+        )
+        flat = flatten(body)
+        content = [p for p in flat if isinstance(p, int)]
+        check(
+            f"右装订 {page_count} 页：每个正文页恰好出现一次",
+            sorted(content) == list(range(1, page_count + 1))
+            and len(set(content)) == page_count,
+        )
+        check(
+            f"右装订 {page_count} 页：补白数自洽",
+            flat.count("BLANK") == body["total_blanks"],
+        )
+
+    # 固定场景四：无法识别或非字符串的 binding_edge 一律 422，并定位到该字段。
+    invalid_edges = [
+        "LEFT",
+        "Left",
+        "middle",
+        "",
+        " left",
+        "right ",
+        1,
+        0,
+        1.5,
+        True,
+        False,
+        None,
+        [],
+        {},
+    ]
+    for edge in invalid_edges:
+        status, body = request(
+            "POST",
+            "/impose",
+            {"page_count": 8, "sheets_per_signature": 2, "binding_edge": edge},
+        )
+        check(f"非法装订侧 {edge!r} 返回 422", status == 422, f"got {status}")
+        check(
+            f"非法装订侧 {edge!r} 定位到 binding_edge",
+            isinstance(body.get("detail"), list)
+            and any(
+                "".join(map(str, err.get("loc", []))) == "bodybinding_edge"
+                for err in body["detail"]
+            ),
+            str(body),
         )
 
     # 非法纸张厚度：整次请求 422。这些可被 JSON 表达的非法值还必须把错误

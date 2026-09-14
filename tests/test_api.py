@@ -380,3 +380,151 @@ def test_non_finite_thickness_token_returns_422(client, token: str) -> None:
         headers={"content-type": "application/json"},
     )
     assert response.status_code == 422, response.text
+
+
+def test_right_binding_mirrors_layout_with_blanks_in_last_signature(client) -> None:
+    # 固定场景一：右装订且末帖含补白。10 页、每帖 2 张（末帖 9、10 + 6 BLANK）：
+    # 每张纸正反面的左右页位水平镜像，BLANK 页位同样参与镜像；正文分帖、
+    # 末尾补白、帖张编号与总补白数均不改变。
+    response = client.post(
+        "/impose",
+        json={"page_count": 10, "sheets_per_signature": 2, "binding_edge": "right"},
+    )
+    assert response.status_code == 200, response.text
+    body = response.json()
+    assert body["page_count"] == 10
+    assert body["sheets_per_signature"] == 2
+    assert body["total_signatures"] == 2
+    assert body["total_blanks"] == 6
+    assert [sig["signature"] for sig in body["signatures"]] == [1, 2]
+    assert [
+        (
+            sh["front"]["left"],
+            sh["front"]["right"],
+            sh["back"]["left"],
+            sh["back"]["right"],
+        )
+        for sig in body["signatures"]
+        for sh in sig["sheets"]
+    ] == [
+        (1, 8, 7, 2),
+        (3, 6, 5, 4),
+        (9, "BLANK", "BLANK", 10),
+        ("BLANK", "BLANK", "BLANK", "BLANK"),
+    ]
+
+
+def test_right_binding_combined_with_creep_compensation(client) -> None:
+    # 固定场景二：右装订 + 纸厚补偿。先生成原有页序与逐张补偿量，再按装订侧
+    # 镜像左右页位；creep_mm 的计算、舍入与跨帖归零保持原样。
+    response = client.post(
+        "/impose",
+        json={
+            "page_count": 32,
+            "sheets_per_signature": 4,
+            "paper_thickness_mm": 0.125,
+            "binding_edge": "right",
+        },
+    )
+    assert response.status_code == 200, response.text
+    body = response.json()
+    assert body["total_signatures"] == 2
+    # creep 序列与跨帖归零与未镜像时完全一致。
+    assert [
+        [sh["creep_mm"] for sh in sig["sheets"]] for sig in body["signatures"]
+    ] == [[0.0, 0.25, 0.5, 0.75], [0.0, 0.25, 0.5, 0.75]]
+    # 首帖页位为左装订的镜像。
+    assert [
+        (
+            sh["front"]["left"],
+            sh["front"]["right"],
+            sh["back"]["left"],
+            sh["back"]["right"],
+        )
+        for sh in body["signatures"][0]["sheets"]
+    ] == [(1, 16, 15, 2), (3, 14, 13, 4), (5, 12, 11, 6), (7, 10, 9, 8)]
+
+
+def test_default_request_snapshot_has_no_binding_edge(client) -> None:
+    # 固定场景三：缺省请求的完整响应快照不得出现新字段，与旧版本逐字段一致。
+    response = client.post(
+        "/impose", json={"page_count": 8, "sheets_per_signature": 2}
+    )
+    assert response.status_code == 200
+    body = response.json()
+    assert "binding_edge" not in body
+    assert body == {
+        "page_count": 8,
+        "sheets_per_signature": 2,
+        "total_signatures": 1,
+        "total_blanks": 0,
+        "signatures": [
+            {
+                "signature": 1,
+                "sheets": [
+                    {
+                        "sheet": 1,
+                        "front": {"left": 8, "right": 1},
+                        "back": {"left": 2, "right": 7},
+                    },
+                    {
+                        "sheet": 2,
+                        "front": {"left": 6, "right": 3},
+                        "back": {"left": 4, "right": 5},
+                    },
+                ],
+            }
+        ],
+    }
+
+
+def test_explicit_left_binding_matches_default_response(client) -> None:
+    # 显式 "left" 与缺省请求的响应逐字段一致（现有调用方无需调整解析）。
+    default = client.post(
+        "/impose", json={"page_count": 10, "sheets_per_signature": 2}
+    ).json()
+    response = client.post(
+        "/impose",
+        json={"page_count": 10, "sheets_per_signature": 2, "binding_edge": "left"},
+    )
+    assert response.status_code == 200, response.text
+    assert response.json() == default
+
+
+@pytest.mark.parametrize(
+    "edge",
+    ["LEFT", "Left", "middle", "", " left", "right ", 1, 0, 1.5, True, False, None, [], {}],
+)
+def test_invalid_binding_edge_returns_422_with_field_location(client, edge) -> None:
+    # 固定场景四：无法识别或非字符串的 binding_edge 一律 422，并定位到该字段。
+    response = client.post(
+        "/impose",
+        json={"page_count": 8, "sheets_per_signature": 2, "binding_edge": edge},
+    )
+    assert response.status_code == 422, (edge, response.text)
+    detail = response.json()["detail"]
+    assert isinstance(detail, list) and detail
+    assert any(
+        "".join(map(str, err["loc"])) == "bodybinding_edge" for err in detail
+    ), detail
+
+
+def test_every_content_page_appears_exactly_once_with_right_binding(client) -> None:
+    for page_count, sheets in itertools.product(
+        [1, 2, 3, 7, 8, 9, 15, 16, 17, 100, 2000], [1, 2, 3, 4]
+    ):
+        response = client.post(
+            "/impose",
+            json={
+                "page_count": page_count,
+                "sheets_per_signature": sheets,
+                "binding_edge": "right",
+            },
+        )
+        assert response.status_code == 200, (page_count, sheets, response.text)
+        body = response.json()
+        flat = flatten_pages(body)
+        content = [p for p in flat if isinstance(p, int)]
+        assert sorted(content) == list(range(1, page_count + 1))
+        assert len(content) == page_count
+        assert flat.count("BLANK") == body["total_blanks"]

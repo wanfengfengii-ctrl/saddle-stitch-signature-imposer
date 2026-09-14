@@ -5,6 +5,11 @@
 
 ``paper_thickness_mm`` 为可选字段：缺省时响应与旧版本完全一致（张对象不
 携带 ``creep_mm``）；传入合法厚度后，每张纸才额外输出 ``creep_mm``。
+
+``binding_edge`` 为可选字段：仅接受 ``"left"`` 或 ``"right"``，缺省等同
+``"left"``（左装订，页序与旧版本一致）；选择 ``"right"`` 时，每张纸正
+反面的左右页位水平镜像。响应结构不新增字段，缺省请求的响应快照与旧版本
+完全一致。
 """
 
 import math
@@ -37,6 +42,8 @@ class ImpositionRequest(BaseModel):
     ``paper_thickness_mm`` 使用 strict 数字校验：布尔值、字符串、显式
     ``null`` 均被拒绝，零、负数、超限值与非有限数由范围/有限性校验拒绝；
     只有**缺省该字段**才表示不做 creep 补偿。
+    ``binding_edge`` 仅接受 ``"left"`` 或 ``"right"``：无法识别的值、非
+    字符串与显式 ``null`` 均被拒绝；只有**缺省该字段**才表示左装订。
     """
 
     model_config = ConfigDict(extra="forbid")
@@ -69,6 +76,26 @@ class ImpositionRequest(BaseModel):
             ),
         ]
     ] = None
+    binding_edge: Optional[Literal["left", "right"]] = Field(
+        default=None,
+        description=(
+            "可选装订侧：'left'（缺省等同）或 'right'。选择 'right' 时，"
+            "每张纸正反面的左右页位水平镜像（含 BLANK 页位），正文分帖、"
+            "末尾补白、帖张编号与总补白数不变。无法识别的值或非字符串一律 "
+            "422；显式传 null 视为无效，整次请求返回 422。"
+        ),
+    )
+
+    @field_validator("binding_edge")
+    @classmethod
+    def validate_binding_edge(cls, value: Optional[str]) -> Optional[str]:
+        # 与 paper_thickness_mm 相同：缺省 = 默认（左装订），显式 null 必须拒绝。
+        if value is None:
+            raise ValueError(
+                "binding_edge must not be null; omit the field to keep "
+                "left binding"
+            )
+        return value
 
     @field_validator("paper_thickness_mm")
     @classmethod

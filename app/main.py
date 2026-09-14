@@ -200,5 +200,6 @@ async def impose_signatures(request: Request) -> ImpositionResponse:
         model.page_count,
         model.sheets_per_signature,
         model.paper_thickness_mm,
+        model.binding_edge,
     )
     return ImpositionResponse.model_validate(result)

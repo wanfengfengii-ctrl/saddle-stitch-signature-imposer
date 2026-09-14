@@ -22,10 +22,22 @@
   补偿只新增 ``creep_mm`` 字段，不改变页序、补白位置与帖/张编号；不传时
   输出与旧版本完全一致（不出现该字段）。
 
+* 可选 ``binding_edge``（仅 ``"left"`` 或 ``"right"``，缺省等同
+  ``"left"``）：选择 ``"right"`` 时，在既有帖、张、正反面对象上把每一面
+  的左右页位水平镜像（含 ``BLANK`` 页位）；正文分帖、末尾补白、帖张
+  编号与总补白数均不改变。与 ``paper_thickness_mm`` 同时传入时，先生成
+  原有页序与逐张补偿量，再按装订侧镜像左右页位；``creep_mm`` 的计算、
+  舍入与跨帖归零保持原样。
+
 例如帖内为 1..8（每帖 2 张）：
 
     第 1 张：正面 (8, 1)，反面 (2, 7)
     第 2 张：正面 (6, 3)，反面 (4, 5)
+
+右装订（``binding_edge="right"``）时同一帖镜像为：
+
+    第 1 张：正面 (1, 8)，反面 (7, 2)
+    第 2 张：正面 (3, 6)，反面 (5, 4)
 """
 
 import math
@@ -37,6 +49,8 @@ MAX_PAGE_COUNT = 2000
 MIN_PAPER_THICKNESS_MM = 0.0
 MAX_PAPER_THICKNESS_MM = 1.0
 ALLOWED_SHEETS_PER_SIGNATURE: tuple[int, ...] = (1, 2, 3, 4)
+ALLOWED_BINDING_EDGES: tuple[str, ...] = ("left", "right")
+DEFAULT_BINDING_EDGE: str = "left"
 PAGES_PER_SHEET = 4
 _CREEP_QUANTUM = Decimal("0.001")
 
@@ -69,6 +83,7 @@ def impose(
     page_count: Any,
     sheets_per_signature: Any,
     paper_thickness_mm: Any = None,
+    binding_edge: Any = None,
 ) -> dict[str, Any]:
     """生成折帖编排。
 
@@ -76,6 +91,10 @@ def impose(
     :param sheets_per_signature: 每帖张数，仅允许 1、2、3、4。
     :param paper_thickness_mm: 可选纸张厚度（毫米），大于 0 且不超过 1 的
         有限小数。传入后每张纸输出 ``creep_mm``（仅当启用补偿时存在）。
+    :param binding_edge: 可选装订侧，仅 ``"left"`` 或 ``"right"``；缺省
+        （``None``）等同 ``"left"``。选择 ``"right"`` 时，每张纸正反面的
+        左右页位水平镜像（含 ``BLANK`` 页位），正文分帖、末尾补白、帖张
+        编号与总补白数不变。
     :return: 可直接序列化为 API 响应的字典。
     :raises ValueError: 参数不合法时抛出（HTTP 层由 Pydantic 先行拦截）。
     """
@@ -91,6 +110,14 @@ def impose(
         raise ValueError(
             "sheets_per_signature must be one of "
             f"{', '.join(str(n) for n in ALLOWED_SHEETS_PER_SIGNATURE)}"
+        )
+
+    if binding_edge is None:
+        binding_edge = DEFAULT_BINDING_EDGE
+    if binding_edge not in ALLOWED_BINDING_EDGES:
+        raise ValueError(
+            "binding_edge must be one of "
+            f"{', '.join(ALLOWED_BINDING_EDGES)}"
         )
 
     if paper_thickness_mm is None:
@@ -150,6 +177,18 @@ def impose(
                 "sheets": sheets,
             }
         )
+
+    if binding_edge == "right":
+        # 右装订：在既有帖/张/正反面对象上水平镜像每一面的左右页位。
+        # 页序、补白位置、帖张编号与 creep 均已按原装订侧生成，此处仅互换
+        # 左右页位（含 BLANK 页位），不触碰其他任何字段。
+        for signature in signatures:
+            for sheet in signature["sheets"]:
+                for side in ("front", "back"):
+                    sheet[side]["left"], sheet[side]["right"] = (
+                        sheet[side]["right"],
+                        sheet[side]["left"],
+                    )
 
     return {
         "page_count": page_count,

@@ -189,6 +189,135 @@ def test_default_response_carries_no_creep_field() -> None:
         )
 
 
+def test_right_binding_mirrors_left_and_right_positions() -> None:
+    # 8 页、每帖 2 张、右装订：每张纸正反面的左右页位水平镜像，帖/张编号不变。
+    result = impose(8, 2, binding_edge="right")
+    (signature,) = result["signatures"]
+    sheet1, sheet2 = signature["sheets"]
+
+    assert sheet1["sheet"] == 1
+    assert (sheet1["front"]["left"], sheet1["front"]["right"]) == (1, 8)
+    assert (sheet1["back"]["left"], sheet1["back"]["right"]) == (7, 2)
+    assert sheet2["sheet"] == 2
+    assert (sheet2["front"]["left"], sheet2["front"]["right"]) == (3, 6)
+    assert (sheet2["back"]["left"], sheet2["back"]["right"]) == (5, 4)
+
+
+def test_right_binding_mirrors_blanks_in_last_signature() -> None:
+    # 10 页、每帖 2 张、右装订：末帖含 6 个 BLANK，BLANK 页位同样参与镜像；
+    # 正文分帖、末尾补白、帖张编号与总补白数均不改变。
+    result = impose(10, 2, binding_edge="right")
+    assert result["total_signatures"] == 2
+    assert result["total_blanks"] == 6
+
+    sig1, sig2 = result["signatures"]
+    assert [sh["sheet"] for sh in sig1["sheets"]] == [1, 2]
+    assert [
+        (
+            sh["front"]["left"],
+            sh["front"]["right"],
+            sh["back"]["left"],
+            sh["back"]["right"],
+        )
+        for sh in sig1["sheets"]
+    ] == [(1, 8, 7, 2), (3, 6, 5, 4)]
+    # 末帖：承载正文末尾页 9、10，补白全部来自帖内末尾页位，镜像后仍在同一张。
+    assert [sh["sheet"] for sh in sig2["sheets"]] == [1, 2]
+    assert [
+        (
+            sh["front"]["left"],
+            sh["front"]["right"],
+            sh["back"]["left"],
+            sh["back"]["right"],
+        )
+        for sh in sig2["sheets"]
+    ] == [(9, BLANK, BLANK, 10), (BLANK, BLANK, BLANK, BLANK)]
+
+
+def test_explicit_left_binding_equals_default() -> None:
+    # 显式 "left" 与缺省（None）逐字段一致，且都与旧版本输出相同。
+    for page_count, sheets in itertools.product(
+        [1, 5, 8, 10, 17, 32], ALLOWED_SHEETS_PER_SIGNATURE
+    ):
+        default = impose(page_count, sheets)
+        assert impose(page_count, sheets, binding_edge="left") == default
+        assert impose(page_count, sheets, binding_edge=None) == default
+
+
+def test_right_binding_is_exact_mirror_of_left() -> None:
+    # 对多组参数：右装订结果 = 左装订结果逐面左右互换，其余字段完全一致。
+    for page_count, sheets in itertools.product(
+        range(1, 33), ALLOWED_SHEETS_PER_SIGNATURE
+    ):
+        left = impose(page_count, sheets)
+        right = impose(page_count, sheets, binding_edge="right")
+        assert right["page_count"] == left["page_count"]
+        assert right["sheets_per_signature"] == left["sheets_per_signature"]
+        assert right["total_signatures"] == left["total_signatures"]
+        assert right["total_blanks"] == left["total_blanks"]
+        assert len(right["signatures"]) == len(left["signatures"])
+        for sig_l, sig_r in zip(left["signatures"], right["signatures"]):
+            assert sig_l["signature"] == sig_r["signature"]
+            for sh_l, sh_r in zip(sig_l["sheets"], sig_r["sheets"]):
+                assert sh_l["sheet"] == sh_r["sheet"]
+                assert sh_r["front"]["left"] == sh_l["front"]["right"]
+                assert sh_r["front"]["right"] == sh_l["front"]["left"]
+                assert sh_r["back"]["left"] == sh_l["back"]["right"]
+                assert sh_r["back"]["right"] == sh_l["back"]["left"]
+
+
+def test_each_content_page_appears_exactly_once_with_right_binding() -> None:
+    for page_count in range(1, 49):
+        for sheets in ALLOWED_SHEETS_PER_SIGNATURE:
+            result = impose(page_count, sheets, binding_edge="right")
+            flat = flatten_pages(result)
+            content_pages = [p for p in flat if isinstance(p, int)]
+            assert sorted(content_pages) == list(range(1, page_count + 1))
+            assert len(content_pages) == len(set(content_pages)) == page_count
+            assert flat.count(BLANK) == result["total_blanks"]
+
+
+def test_right_binding_preserves_creep_sequence_and_reset() -> None:
+    # 右装订 + 0.125mm、32 页两帖：creep 计算、舍入与跨帖归零保持原样。
+    result = impose(32, 4, 0.125, binding_edge="right")
+    expected = [0.0, 0.25, 0.5, 0.75]
+    assert result["total_signatures"] == 2
+    for signature in result["signatures"]:
+        assert [sh["creep_mm"] for sh in signature["sheets"]] == expected
+    # 首帖页位为左装订的镜像。
+    first = result["signatures"][0]["sheets"]
+    assert [
+        (
+            sh["front"]["left"],
+            sh["front"]["right"],
+            sh["back"]["left"],
+            sh["back"]["right"],
+        )
+        for sh in first
+    ] == [(1, 16, 15, 2), (3, 14, 13, 4), (5, 12, 11, 6), (7, 10, 9, 8)]
+
+
+def test_right_binding_with_creep_keeps_pages_unique() -> None:
+    # 右装订 + 补偿组合下，每个正文页仍恰好出现一次、补白数自洽。
+    for page_count in range(1, 49):
+        for sheets in ALLOWED_SHEETS_PER_SIGNATURE:
+            result = impose(page_count, sheets, 0.125, binding_edge="right")
+            flat = flatten_pages(result)
+            content = [p for p in flat if isinstance(p, int)]
+            assert sorted(content) == list(range(1, page_count + 1))
+            assert len(content) == len(set(content)) == page_count
+            assert flat.count(BLANK) == result["total_blanks"]
+
+
+@pytest.mark.parametrize(
+    "edge",
+    ["LEFT", "Left", "middle", "", " left", "right ", 1, 0, 1.5, True, False, [], {}, ["left"]],
+)
+def test_invalid_binding_edge_raises_value_error(edge: object) -> None:
+    with pytest.raises(ValueError):
+        impose(8, 2, binding_edge=edge)
+
+
 def test_four_sheet_signature_creep_sequence_at_0_125() -> None:
     # 四张一帖、0.125mm：最外张为 0，每向内一张增加 0.250mm。
     result = impose(16, 4, 0.125)
