@@ -34,8 +34,9 @@ class ImpositionRequest(BaseModel):
     """折帖编排请求。
 
     整数字段使用 strict 整数校验：1.0、1.5、``"8"``、``true`` 等均不接受。
-    ``paper_thickness_mm`` 使用 strict 小数校验：布尔值、字符串等在类型
-    层即被拒绝，零、负数、超限值与非有限数由范围/有限性校验拒绝。
+    ``paper_thickness_mm`` 使用 strict 数字校验：布尔值、字符串、显式
+    ``null`` 均被拒绝，零、负数、超限值与非有限数由范围/有限性校验拒绝；
+    只有**缺省该字段**才表示不做 creep 补偿。
     """
 
     model_config = ConfigDict(extra="forbid")
@@ -62,7 +63,8 @@ class ImpositionRequest(BaseModel):
                 le=MAX_PAPER_THICKNESS_MM,
                 description=(
                     "可选纸张厚度（毫米），大于 0 且不超过 1 的有限小数；"
-                    "缺省时不做 creep 补偿，响应不包含 creep_mm。"
+                    "缺省该字段时不做 creep 补偿，响应不包含 creep_mm。"
+                    "显式传 null 视为无效，整次请求返回 422。"
                 ),
             ),
         ]
@@ -70,8 +72,15 @@ class ImpositionRequest(BaseModel):
 
     @field_validator("paper_thickness_mm")
     @classmethod
-    def validate_finite_thickness(cls, value: Optional[float]) -> Optional[float]:
-        if value is not None and not math.isfinite(value):
+    def validate_thickness(cls, value: Optional[float]) -> Optional[float]:
+        # 该校验器仅对显式提供的字段值触发（字段缺省时使用默认值，不进入
+        # 校验器）：因此缺省 = 不补偿，而显式 null 必须拒绝整次请求。
+        if value is None:
+            raise ValueError(
+                "paper_thickness_mm must not be null; omit the field to "
+                "disable creep compensation"
+            )
+        if not math.isfinite(value):
             raise ValueError("paper_thickness_mm must be a finite number")
         return value
 

@@ -212,8 +212,9 @@ def main() -> int:
             stripped == body0,
         )
 
-    # 非法纸张厚度：整次请求 422。可被 JSON 表达的非法值还必须把错误
-    # 定位到 body.paper_thickness_mm（布尔、字符串、零、负数、超限）。
+    # 非法纸张厚度：整次请求 422。这些可被 JSON 表达的非法值还必须把错误
+    # 定位到 body.paper_thickness_mm（布尔、字符串、零、负数、超限、
+    # 显式 null；只有字段缺省才表示不补偿）。
     invalid_thickness = [
         (True, True),
         (False, True),
@@ -225,6 +226,7 @@ def main() -> int:
         (-1.0, True),
         (1.0001, True),
         (2, True),
+        (None, True),
     ]
     for thickness, expect_loc in invalid_thickness:
         status, body = request(

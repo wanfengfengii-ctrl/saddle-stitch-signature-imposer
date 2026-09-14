@@ -238,8 +238,8 @@ def test_integer_thickness_one_is_accepted(client) -> None:
     assert [sh["creep_mm"] for sh in sheets] == [0.0, 2.0]
 
 
-def test_explicit_null_thickness_equals_omitted(client) -> None:
-    # 显式 null 与缺省等价：200 且不输出 creep_mm。
+def test_explicit_null_thickness_is_rejected(client) -> None:
+    # 显式 null 与缺省不同：必须整次拒绝（422）并定位到厚度字段。
     response = client.post(
         "/impose",
         json={
@@ -247,6 +247,20 @@ def test_explicit_null_thickness_equals_omitted(client) -> None:
             "sheets_per_signature": 2,
             "paper_thickness_mm": None,
         },
+    )
+    assert response.status_code == 422, response.text
+    detail = response.json()["detail"]
+    assert any(
+        "".join(map(str, err["loc"])) == "bodypaper_thickness_mm"
+        for err in detail
+    ), detail
+
+
+def test_omitted_thickness_succeeds_without_creep(client) -> None:
+    # 缺省该字段才表示不补偿：200 且不输出 creep_mm。
+    response = client.post(
+        "/impose",
+        json={"page_count": 8, "sheets_per_signature": 2},
     )
     assert response.status_code == 200, response.text
     assert all(
@@ -258,7 +272,7 @@ def test_explicit_null_thickness_equals_omitted(client) -> None:
 
 @pytest.mark.parametrize(
     "thickness",
-    [0, 0.0, -0.1, -1.0, 1.0001, 2, True, False, "0.125", "1", [], {}],
+    [0, 0.0, -0.1, -1.0, 1.0001, 2, True, False, "0.125", "1", None, [], {}],
 )
 def test_invalid_thickness_returns_422_with_field_location(
     client, thickness: object
