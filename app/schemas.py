@@ -2,16 +2,28 @@
 
 非法页数、非整数或不支持的每帖张数都在请求模型层被拒绝，FastAPI 统一
 返回 HTTP 422（请求体为非法 JSON 时同样由 FastAPI 转为 422）。
+
+``paper_thickness_mm`` 为可选字段：缺省时响应与旧版本完全一致（张对象不
+携带 ``creep_mm``）；传入合法厚度后，每张纸才额外输出 ``creep_mm``。
 """
 
-from typing import Annotated, Literal
+import math
+from typing import Annotated, Literal, Optional
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator
+from pydantic import (
+    BaseModel,
+    ConfigDict,
+    Field,
+    field_validator,
+    model_serializer,
+)
 
 from .imposition import (
     ALLOWED_SHEETS_PER_SIGNATURE,
     MAX_PAGE_COUNT,
+    MAX_PAPER_THICKNESS_MM,
     MIN_PAGE_COUNT,
+    MIN_PAPER_THICKNESS_MM,
 )
 
 Page = int | Literal["BLANK"]
@@ -21,7 +33,9 @@ Page = int | Literal["BLANK"]
 class ImpositionRequest(BaseModel):
     """折帖编排请求。
 
-    使用 strict 整数校验：1.0、1.5、``"8"``、``true`` 等均不接受。
+    整数字段使用 strict 整数校验：1.0、1.5、``"8"``、``true`` 等均不接受。
+    ``paper_thickness_mm`` 使用 strict 小数校验：布尔值、字符串等在类型
+    层即被拒绝，零、负数、超限值与非有限数由范围/有限性校验拒绝。
     """
 
     model_config = ConfigDict(extra="forbid")
@@ -39,6 +53,27 @@ class ImpositionRequest(BaseModel):
         int,
         Field(strict=True, description="每帖张数，仅允许 1、2、3、4。"),
     ]
+    paper_thickness_mm: Optional[
+        Annotated[
+            float,
+            Field(
+                strict=True,
+                gt=MIN_PAPER_THICKNESS_MM,
+                le=MAX_PAPER_THICKNESS_MM,
+                description=(
+                    "可选纸张厚度（毫米），大于 0 且不超过 1 的有限小数；"
+                    "缺省时不做 creep 补偿，响应不包含 creep_mm。"
+                ),
+            ),
+        ]
+    ] = None
+
+    @field_validator("paper_thickness_mm")
+    @classmethod
+    def validate_finite_thickness(cls, value: Optional[float]) -> Optional[float]:
+        if value is not None and not math.isfinite(value):
+            raise ValueError("paper_thickness_mm must be a finite number")
+        return value
 
     @field_validator("sheets_per_signature")
     @classmethod
@@ -59,11 +94,30 @@ class SidePages(BaseModel):
 
 
 class SheetLayout(BaseModel):
-    """一张纸的双面编排。"""
+    """一张纸的双面编排。
+
+    ``creep_mm`` 仅在请求传入 ``paper_thickness_mm`` 时出现；缺省调用的
+    序列化结果中不包含该字段，保持旧版本响应快照不变。
+    """
 
     sheet: int = Field(ge=1, description="帖内张号，从 1 开始。")
     front: SidePages = Field(description="正面，从左到右。")
     back: SidePages = Field(description="反面，从左到右。")
+    creep_mm: Optional[float] = Field(
+        default=None,
+        ge=0,
+        description=(
+            "该张统一的 creep 补偿（毫米）：最外张为 0，每向内一张增加"
+            "两倍纸厚；按帖独立计量。仅启用补偿时输出。"
+        ),
+    )
+
+    @model_serializer(mode="wrap")
+    def _omit_creep_when_disabled(self, handler, info):  # type: ignore[no-untyped-def]
+        data = handler(self)
+        if data.get("creep_mm") is None:
+            data.pop("creep_mm", None)
+        return data
 
 
 class SignatureLayout(BaseModel):

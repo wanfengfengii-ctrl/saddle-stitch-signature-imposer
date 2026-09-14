@@ -45,6 +45,21 @@
 
 注意补白全部位于**最后一帖**（承载正文末尾页 9、10），第一帖没有 BLANK。
 
+6. （可选）传入 **纸张厚度 `paper_thickness_mm`**（毫米，`0 < t ≤ 1` 的
+   有限小数）时启用 **creep（订书沟位移）补偿**：厚纸手册折叠后内层纸张
+   向外推移，裁切时需要按嵌套深度补偿。以帖内**最外张**（第 1 张）的
+   嵌套深度为零，每向内一张深度加一，该张纸统一的补偿量为
+
+   `creep_mm = 2 × paper_thickness_mm × (k − 1)`
+
+   （外层每张纸的正反两层面板各贡献一个纸厚）。计量**按帖独立**，跨帖
+   重新从零开始；结果按**十进制四舍五入保留三位小数**。补偿只在每张纸
+   上**新增 `creep_mm` 字段**，不改变页序、补白位置与帖/张编号；不传
+   `paper_thickness_mm` 时响应与旧版本完全一致（不出现该字段）。
+
+   例如每帖 4 张、厚度 `0.125` 时，各帖的张依次得到
+   `0 / 0.250 / 0.500 / 0.750` mm；下一帖重新从 `0` 开始。
+
 ---
 
 ## 2. API
@@ -61,6 +76,7 @@
 |------|------|------|
 | `page_count` | 整数 | 1 ≤ 值 ≤ 2000，必须是真正的整数（`1.0`、`"8"`、`true` 均拒绝） |
 | `sheets_per_signature` | 整数 | 仅允许 `1`、`2`、`3`、`4` |
+| `paper_thickness_mm` | 小数 | 可选。大于 `0` 且不超过 `1` 的**有限小数**；布尔值（`true`/`false`）、字符串（`"0.5"`）、`0`、负数、`> 1`、`NaN`/`Infinity` 一律 422。整数 `1` 作为 JSON 数字被接受。显式 `null` 与缺省等价。 |
 
 多余字段同样拒绝（`extra="forbid"`）。
 
@@ -92,13 +108,43 @@
 }
 ```
 
-页位置的值为正文页码（整数）或字符串 `"BLANK"`。
+页位置的值为正文页码（整数）或字符串 `"BLANK"`。**不传厚度时，张对象
+不包含 `creep_mm` 字段**（旧版本响应快照保持不变）。
+
+### 启用 creep 补偿（`paper_thickness_mm`）
+
+请求增加 `paper_thickness_mm` 后，**每张纸**额外携带 `creep_mm`（同样
+保留页序、补白与编号）。每帖 4 张、厚度 `0.125`：
+
+```json
+{
+  "page_count": 16,
+  "sheets_per_signature": 4,
+  "total_signatures": 1,
+  "total_blanks": 0,
+  "signatures": [
+    {
+      "signature": 1,
+      "sheets": [
+        {"sheet": 1, "front": {"left": 16, "right": 1}, "back": {"left": 2, "right": 15}, "creep_mm": 0.0},
+        {"sheet": 2, "front": {"left": 14, "right": 3}, "back": {"left": 4, "right": 13}, "creep_mm": 0.25},
+        {"sheet": 3, "front": {"left": 12, "right": 5}, "back": {"left": 6, "right": 11}, "creep_mm": 0.5},
+        {"sheet": 4, "front": {"left": 10, "right": 7}, "back": {"left": 8, "right": 9}, "creep_mm": 0.75}
+      ]
+    }
+  ]
+}
+```
+
+> `creep_mm` 只在启用补偿时出现；最外张恒为 `0.0`，每向内一张增加
+> `2 × 纸厚`，跨帖重新从零计量。
 
 ### 错误响应
 
-任何非法输入（页数越界、类型非整数、每帖张数不支持、缺字段、多字段、
-非法 JSON）**整次请求返回 HTTP 422**，响应体为 FastAPI 标准的
-`detail` 错误数组，并定位到出错字段，例如：
+任何非法输入（页数越界、类型非整数、每帖张数不支持、纸张厚度为
+布尔/字符串/零/负数/超限/非有限数、缺字段、多字段、非法 JSON）**整次
+请求返回 HTTP 422**，响应体为 FastAPI 标准的 `detail` 错误数组，并定位
+到出错字段，例如：
 
 ```json
 {
@@ -144,6 +190,10 @@ curl -s http://localhost:8000/healthz
 curl -s -X POST http://localhost:8000/impose \
   -H 'content-type: application/json' \
   -d '{"page_count": 10, "sheets_per_signature": 2}'
+# 启用 creep 补偿（纸张厚度 0.125mm）：
+curl -s -X POST http://localhost:8000/impose \
+  -H 'content-type: application/json' \
+  -d '{"page_count": 32, "sheets_per_signature": 4, "paper_thickness_mm": 0.125}'
 ```
 
 ---
@@ -164,11 +214,19 @@ python -m pytest
   - 对 `page_count = 1..48` 与四种每帖张数做穷举，断言每个正文页
     **恰好出现一次**、总版面数、帖数、张号/帖号顺序、补白数全部自洽；
   - 补白只出现在最后一帖、帖间无空页；
+  - creep 补偿：默认响应不含 `creep_mm`；四张一帖 `0.125` 依次
+    `0/0.250/0.500/0.750`、跨帖重置、十进制四舍五入三位、启用前后
+    编排一致且每页仍恰好一次；非法厚度（含 `bool`、字符串、零、负数、
+    超限、`NaN`/`Infinity`）抛错；
   - 核心函数对非法参数与非整数（含 `bool`、字符串、浮点、`None`）抛错。
 - `tests/test_api.py`：HTTP 层
   - 合法请求返回唯一页序；多组参数下每页恰好一次；
   - 非法页数、非整数、不支持的每帖张数、缺字段、多字段、非法 JSON、
     错误 Content-Type 一律 **422**，且携带具体错误定位；
+  - 默认响应**整份快照锁定**（不含 `creep_mm`）；启用补偿后的 creep
+    序列、跨帖重置、整数 `1`、显式 `null` 行为；非法厚度 422 且定位到
+    `body.paper_thickness_mm`；`NaN`/`Infinity` token 返回合法 JSON 的
+    422；
   - 响应结构稳定、BLANK 只在末尾。
 - `tests/conftest.py`：FastAPI `TestClient` 夹具。
 
@@ -176,7 +234,11 @@ python -m pytest
 
 `scripts/verify.py` 对运行中的 API 发起**真实 HTTP 调用**（仅用标准库），
 覆盖健康检查、10 种页数 × 4 种每帖张数的合法用例（逐页去重、补白自洽、
-无帖间插空）与 12 种非法载荷（必须全部 422）。
+无帖间插空）、12 种非法载荷（必须全部 422），以及 creep 补偿专项：
+默认响应整份快照不变（无 `creep_mm`）、四张一帖 `0.125` 依次
+`0/0.250/0.500/0.750` 且跨帖重置、对全部合法组合验证启用前后页序一致、
+每页仍恰好一次、非法厚度 422 并定位到 `paper_thickness_mm`（含
+`NaN`/`Infinity` token）。
 
 Compose 将其建模为一次性服务（`restart: "no"`，跑完即退出）：
 
