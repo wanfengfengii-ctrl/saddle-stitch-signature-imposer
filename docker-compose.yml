@@ -3,6 +3,8 @@
 #   API_PORT=9000 docker compose up --build api
 services:
   api:
+    # 镜像只在此服务构建一次，verify 按镜像名复用，避免两个服务并行
+    # 构建同一镜像标签（saddle-stitch-api:latest）造成打标签冲突。
     build: .
     image: saddle-stitch-api:latest
     ports:
@@ -20,12 +22,13 @@ services:
 
   # 一次性验收服务：等待 API 健康后执行端到端验收，打印结果并退出
   # （退出码 0 即验收通过；restart: no 保证不常驻、不重试）。
+  # 复用 api 构建出的本地镜像（pull_policy: never，绝不尝试远程拉取）。
   # 用法：
   #   docker compose up --build verify
-  #   docker compose run --rm verify
+  #   docker compose build api && docker compose run --rm verify
   verify:
     image: saddle-stitch-api:latest
-    build: .
+    pull_policy: never
     depends_on:
       api:
         condition: service_healthy

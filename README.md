@@ -189,6 +189,11 @@ docker compose run --rm verify
 `verify` 通过 `depends_on: condition: service_healthy` 等 API 就绪后
 再执行；退出码 0 表示全部验收项通过。
 
+> 镜像只在 `api` 服务声明一次 `build`，`verify` 用相同镜像名 +
+> `pull_policy: never` 复用本地构建产物。这样 `up --build verify`
+> 只会构建一次镜像，避免两个服务并行构建、对同一镜像标签重复打标签
+> 导致的构建失败。
+
 ---
 
 ## 5. 项目结构
