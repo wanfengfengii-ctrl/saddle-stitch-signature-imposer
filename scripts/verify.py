@@ -87,6 +87,30 @@ def request_raw(method: str, path: str, raw_body: str) -> tuple[int, object]:
             return exc.code, {}
 
 
+def request_raw_with_headers(
+    method: str, path: str, raw_body: bytes, headers: dict
+) -> tuple[int, object]:
+    """发送原始字节请求体并自定义请求头。
+
+    用于覆盖含非法 UTF-8 字节的正文，以及未声明 / 声明错误
+    Content-Type 的场景。
+    """
+    req = urllib.request.Request(
+        f"{API_BASE_URL}{path}",
+        data=raw_body,
+        headers={"accept": "application/json", **headers},
+        method=method,
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=TIMEOUT) as resp:
+            return resp.status, json.loads(resp.read().decode("utf-8"))
+    except urllib.error.HTTPError as exc:
+        try:
+            return exc.code, json.loads(exc.read().decode("utf-8"))
+        except (ValueError, UnicodeDecodeError):
+            return exc.code, {}
+
+
 def flatten(body: dict) -> list:
     pages: list = []
     for signature in body["signatures"]:
@@ -254,6 +278,83 @@ def main() -> int:
         )
         status, body = request_raw("POST", "/impose", raw)
         check(f"非有限数 {token} 返回 422", status == 422, f"got {status}")
+
+    # 非法 UTF-8 编码字节：解析阶段必须返回可解析的 422，而非 5xx。
+    status, body = request_raw_with_headers(
+        "POST",
+        "/impose",
+        b'{"page_count": 8,\xff "sheets_per_signature": 2}',
+        {"content-type": "application/json"},
+    )
+    check("含非法编码字节的正文返回 422", status == 422, f"got {status}")
+    check(
+        "非法编码 422 携带 detail 列表并定位 body",
+        isinstance(body.get("detail"), list)
+        and any("".join(map(str, err.get("loc", []))) == "body" for err in body["detail"]),
+        str(body),
+    )
+
+    # 未配对代理字符：定位到 page_count 返回 422，响应体仍为合法 JSON。
+    status, body = request_raw(
+        "POST",
+        "/impose",
+        r'{"page_count": "\uD800", "sheets_per_signature": 2}',
+    )
+    check("页数字段含未配对代理字符返回 422", status == 422, f"got {status}")
+    check(
+        "未配对代理错误定位到 page_count",
+        isinstance(body.get("detail"), list)
+        and any(
+            "".join(map(str, err.get("loc", []))) == "bodypage_count"
+            for err in body["detail"]
+        ),
+        str(body),
+    )
+
+    # 同一对象内重复字段：无论两次取值是否相同，整次请求 422。
+    for raw in (
+        '{"page_count": 7, "page_count": 99, "sheets_per_signature": 2}',
+        '{"page_count": 8, "sheets_per_signature": 2, "sheets_per_signature": 2}',
+    ):
+        status, body = request_raw("POST", "/impose", raw)
+        check(f"重复字段整次拒绝：{raw}", status == 422, f"got {status}")
+        check(
+            "重复字段 422 携带 detail 列表",
+            isinstance(body.get("detail"), list) and bool(body["detail"]),
+            str(body),
+        )
+
+    # 未声明 / 声明错误的 Content-Type：即使正文是合法 JSON 也必须 422。
+    valid_json_body = b'{"page_count": 8, "sheets_per_signature": 2}'
+    status, body = request_raw_with_headers(
+        "POST", "/impose", valid_json_body, headers={}
+    )
+    check("未声明 Content-Type 返回 422", status == 422, f"got {status}")
+    for content_type in ("text/plain", "application/x-www-form-urlencoded"):
+        status, body = request_raw_with_headers(
+            "POST",
+            "/impose",
+            valid_json_body,
+            headers={"content-type": content_type},
+        )
+        check(
+            f"非 JSON 媒体类型 {content_type} 返回 422",
+            status == 422,
+            f"got {status}",
+        )
+        check(
+            f"{content_type} 的 422 携带 detail 列表",
+            isinstance(body.get("detail"), list) and bool(body["detail"]),
+            str(body),
+        )
+    # 带 charset 参数的 application/json 仍应被接受。
+    status, body = request_raw_with_headers(
+        "POST",
+        "/impose",
+        valid_json_body,
+        headers={"content-type": "application/json; charset=utf-8"},
+    )
+    check("application/json; charset=utf-8 正常受理", status == 200, str(body))
 
     invalid_payloads = [
         {"page_count": 0, "sheets_per_signature": 2},

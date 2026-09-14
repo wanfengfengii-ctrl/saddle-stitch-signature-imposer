@@ -111,6 +111,81 @@ def test_malformed_json_returns_422(client) -> None:
     assert response.status_code == 422
 
 
+def test_body_with_invalid_utf8_bytes_returns_422(client) -> None:
+    # 请求体含非法 UTF-8 编码字节：必须在解析阶段返回可解析的 422，
+    # 而不是让解码异常冒泡成 5xx。
+    response = client.post(
+        "/impose",
+        content=b'{"page_count": 8,\xff "sheets_per_signature": 2}',
+        headers={"content-type": "application/json"},
+    )
+    assert response.status_code == 422
+    body = response.json()
+    assert isinstance(body["detail"], list) and body["detail"]
+    assert any(err["loc"] == ["body"] for err in body["detail"]), body
+
+
+def test_lone_surrogate_character_in_page_count_returns_field_level_422(
+    client,
+) -> None:
+    # 页数字段中出现未配对代理字符（\uD800）：必须定位到 page_count
+    # 返回 422，且错误响应体本身仍是合法 JSON（不发生编码异常）。
+    response = client.post(
+        "/impose",
+        content=b'{"page_count": "\\uD800", "sheets_per_signature": 2}',
+        headers={"content-type": "application/json"},
+    )
+    assert response.status_code == 422, response.text
+    detail = response.json()["detail"]
+    assert any(
+        "".join(err["loc"]) == "bodypage_count" for err in detail
+    ), detail
+
+
+@pytest.mark.parametrize(
+    "raw",
+    [
+        b'{"page_count": 7, "page_count": 99, "sheets_per_signature": 2}',
+        b'{"page_count": 8, "sheets_per_signature": 2, "sheets_per_signature": 2}',
+    ],
+)
+def test_duplicate_json_fields_reject_entire_request(client, raw: bytes) -> None:
+    # 同一对象内出现重复字段（无论两次取值是否相同）都必须整次拒绝，
+    # 不能静默采用后值继续编排。
+    response = client.post(
+        "/impose",
+        content=raw,
+        headers={"content-type": "application/json"},
+    )
+    assert response.status_code == 422, response.text
+    body = response.json()
+    assert isinstance(body["detail"], list) and body["detail"]
+
+
+@pytest.mark.parametrize("content_type", [None, "text/plain", "application/x-www-form-urlencoded"])
+def test_non_json_media_type_is_rejected(client, content_type: str | None) -> None:
+    # 契约只接受 application/json：未声明 Content-Type 或声明为其他媒体
+    # 类型都必须 422 拒绝，绝不尝试按其他格式解释正文。
+    headers = {} if content_type is None else {"content-type": content_type}
+    response = client.post(
+        "/impose",
+        content=b'{"page_count": 8, "sheets_per_signature": 2}',
+        headers=headers,
+    )
+    assert response.status_code == 422, response.text
+    body = response.json()
+    assert isinstance(body["detail"], list) and body["detail"]
+
+
+def test_json_content_type_with_charset_is_accepted(client) -> None:
+    response = client.post(
+        "/impose",
+        content=b'{"page_count": 8, "sheets_per_signature": 2}',
+        headers={"content-type": "application/json; charset=utf-8"},
+    )
+    assert response.status_code == 200, response.text
+
+
 def test_wrong_content_type_does_not_create_work(client) -> None:
     # 非 JSON 请求体同样在解析阶段被拒，不会落到编排逻辑。
     response = client.post(
