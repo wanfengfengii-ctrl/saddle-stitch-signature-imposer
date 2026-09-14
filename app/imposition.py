@@ -29,6 +29,13 @@
   原有页序与逐张补偿量，再按装订侧镜像左右页位；``creep_mm`` 的计算、
   舍入与跨帖归零保持原样。
 
+* 可选 ``page_number_start``（1 至 999999 的严格整数，缺省为 1）：编排
+  核心仍按 ``page_count`` 分帖、按帖容量计算末尾补白，只把正文页映射为
+  从该起点连续递增的编号；``BLANK``、帖/张编号与补白数均不受影响。起点
+  与正文页数相加（``page_number_start + page_count``）不得超过 999999。
+  与右装订及纸厚补偿组合时，**先完成编号映射**，再执行既有镜像并保留
+  原补偿量。
+
 例如帖内为 1..8（每帖 2 张）：
 
     第 1 张：正面 (8, 1)，反面 (2, 7)
@@ -46,6 +53,8 @@ from typing import Any, Literal
 
 MIN_PAGE_COUNT = 1
 MAX_PAGE_COUNT = 2000
+MIN_PAGE_NUMBER_START = 1
+MAX_PAGE_NUMBER_START = 999999
 MIN_PAPER_THICKNESS_MM = 0.0
 MAX_PAPER_THICKNESS_MM = 1.0
 ALLOWED_SHEETS_PER_SIGNATURE: tuple[int, ...] = (1, 2, 3, 4)
@@ -84,6 +93,7 @@ def impose(
     sheets_per_signature: Any,
     paper_thickness_mm: Any = None,
     binding_edge: Any = None,
+    page_number_start: Any = None,
 ) -> dict[str, Any]:
     """生成折帖编排。
 
@@ -95,6 +105,10 @@ def impose(
         （``None``）等同 ``"left"``。选择 ``"right"`` 时，每张纸正反面的
         左右页位水平镜像（含 ``BLANK`` 页位），正文分帖、末尾补白、帖张
         编号与总补白数不变。
+    :param page_number_start: 可选正文页码起点，1 至 999999 的严格整数；
+        缺省（``None``）等同 1。只做正文页编号映射，分帖、补白与帖/张
+        编号均不改变；与右装订及补偿组合时先完成编号映射，再镜像并保留
+        原补偿量。起点与正文页数相加超过 999999 时拒绝。
     :return: 可直接序列化为 API 响应的字典。
     :raises ValueError: 参数不合法时抛出（HTTP 层由 Pydantic 先行拦截）。
     """
@@ -110,6 +124,22 @@ def impose(
         raise ValueError(
             "sheets_per_signature must be one of "
             f"{', '.join(str(n) for n in ALLOWED_SHEETS_PER_SIGNATURE)}"
+        )
+
+    if page_number_start is None:
+        page_number_start = 1
+    if not _is_real_int(page_number_start):
+        raise ValueError("page_number_start must be an integer")
+    if not (MIN_PAGE_NUMBER_START <= page_number_start <= MAX_PAGE_NUMBER_START):
+        raise ValueError(
+            "page_number_start must be between "
+            f"{MIN_PAGE_NUMBER_START} and {MAX_PAGE_NUMBER_START}"
+        )
+    # 题面约定：起点与正文页数相加后超过 999999 即拒绝（不生成部分编排）。
+    if page_number_start + page_count > MAX_PAGE_NUMBER_START:
+        raise ValueError(
+            "page_number_start + page_count must not exceed "
+            f"{MAX_PAGE_NUMBER_START}; got {page_number_start} + {page_count}"
         )
 
     if binding_edge is None:
@@ -140,10 +170,16 @@ def impose(
     capacity = PAGES_PER_SHEET * sheets_per_signature
     total_signatures = (page_count + capacity - 1) // capacity
     # 只在全文末尾补白：帖容量减去“正文页数对帖容量的余数”，整除则为 0。
+    # 分帖与补白只看正文页数，与页码起点无关。
     total_blanks = (-page_count) % capacity
 
-    # 正文页 1..N，末尾接全部补白；帖间不存在任何空页。
-    padded: list[int | None] = list(range(1, page_count + 1)) + [None] * total_blanks
+    # 正文页编号为 start..start+N-1，末尾接全部补白；帖间不存在任何空页。
+    # 编号映射在分帖/补白计算之后、镜像之前完成：右装订与纸厚补偿组合时，
+    # 后续镜像与 creep 计算都作用在这批已映射的编号上。
+    padded: list[int | None] = (
+        list(range(page_number_start, page_number_start + page_count))
+        + [None] * total_blanks
+    )
 
     signatures: list[dict[str, Any]] = []
     for sig_index in range(total_signatures):

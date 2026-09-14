@@ -9,6 +9,7 @@ from app.imposition import (
     ALLOWED_SHEETS_PER_SIGNATURE,
     BLANK,
     MAX_PAGE_COUNT,
+    MAX_PAGE_NUMBER_START,
     impose,
 )
 
@@ -405,3 +406,214 @@ def test_invalid_thickness_raises_value_error(thickness: object) -> None:
 def test_non_finite_thickness_raises_value_error(thickness: float) -> None:
     with pytest.raises(ValueError):
         impose(8, 2, thickness)
+
+
+# ===== page_number_start（正文页码起点）=====
+
+
+def test_page_number_start_37_per_side_pages_with_trailing_blanks() -> None:
+    # 固定核对：起点 37、10 页、每帖 2 张：第一帖承载原文页 37..44，
+    # 末帖承载 45、46 并含 6 个补白。逐面核对页码（BLANK 不受编号影响）。
+    result = impose(10, 2, page_number_start=37)
+    assert result["total_signatures"] == 2
+    assert result["total_blanks"] == 6
+
+    sig1, sig2 = result["signatures"]
+    assert sig1["signature"] == 1 and sig2["signature"] == 2
+    assert [sh["sheet"] for sh in sig1["sheets"]] == [1, 2]
+    assert [
+        (
+            sh["front"]["left"],
+            sh["front"]["right"],
+            sh["back"]["left"],
+            sh["back"]["right"],
+        )
+        for sh in sig1["sheets"]
+    ] == [(44, 37, 38, 43), (42, 39, 40, 41)]
+    assert [sh["sheet"] for sh in sig2["sheets"]] == [1, 2]
+    assert [
+        (
+            sh["front"]["left"],
+            sh["front"]["right"],
+            sh["back"]["left"],
+            sh["back"]["right"],
+        )
+        for sh in sig2["sheets"]
+    ] == [
+        (BLANK, 45, 46, BLANK),
+        (BLANK, BLANK, BLANK, BLANK),
+    ]
+    # 响应不新增任何与起点相关的字段。
+    assert set(result) == {
+        "page_count",
+        "sheets_per_signature",
+        "total_signatures",
+        "total_blanks",
+        "signatures",
+    }
+
+
+def test_page_number_start_37_combined_with_right_binding_and_creep() -> None:
+    # 三项功能组合：先完成编号映射，再执行既有镜像，creep 补偿量保持原样。
+    result = impose(10, 2, 0.125, binding_edge="right", page_number_start=37)
+    assert result["total_signatures"] == 2
+    assert result["total_blanks"] == 6
+
+    sig1, sig2 = result["signatures"]
+    assert [
+        (
+            sh["front"]["left"],
+            sh["front"]["right"],
+            sh["back"]["left"],
+            sh["back"]["right"],
+            sh["creep_mm"],
+        )
+        for sh in sig1["sheets"]
+    ] == [(37, 44, 43, 38, 0.0), (39, 42, 41, 40, 0.25)]
+    assert [
+        (
+            sh["front"]["left"],
+            sh["front"]["right"],
+            sh["back"]["left"],
+            sh["back"]["right"],
+            sh["creep_mm"],
+        )
+        for sh in sig2["sheets"]
+    ] == [
+        (45, BLANK, BLANK, 46, 0.0),
+        (BLANK, BLANK, BLANK, BLANK, 0.25),
+    ]
+
+    # 等价刻画：右装订 + 起点 = 同起点左装订逐面左右互换，creep 完全一致。
+    left = impose(10, 2, 0.125, binding_edge="left", page_number_start=37)
+    for sig_l, sig_r in zip(left["signatures"], result["signatures"]):
+        assert sig_l["signature"] == sig_r["signature"]
+        for sh_l, sh_r in zip(sig_l["sheets"], sig_r["sheets"]):
+            assert sh_l["sheet"] == sh_r["sheet"]
+            assert sh_l["creep_mm"] == sh_r["creep_mm"]
+            assert sh_r["front"] == {
+                "left": sh_l["front"]["right"],
+                "right": sh_l["front"]["left"],
+            }
+            assert sh_r["back"] == {
+                "left": sh_l["back"]["right"],
+                "right": sh_l["back"]["left"],
+            }
+
+
+def test_page_number_start_defaults_to_one() -> None:
+    # 缺省（None）与显式 1 都与旧版本输出逐字段一致。
+    default = impose(10, 2)
+    assert impose(10, 2, page_number_start=None) == default
+    assert impose(10, 2, page_number_start=1) == default
+
+
+def test_page_number_start_changes_only_content_numbers() -> None:
+    # 分帖、补白数、帖/张编号完全按 page_count 计算，与起点无关；
+    # 仅正文页编号被整体平移。
+    for start in (1, 2, 37, 1000):
+        baseline = impose(10, 2)
+        shifted = impose(10, 2, page_number_start=start)
+        assert shifted["page_count"] == baseline["page_count"] == 10
+        assert shifted["sheets_per_signature"] == 2
+        assert shifted["total_signatures"] == baseline["total_signatures"] == 2
+        assert shifted["total_blanks"] == baseline["total_blanks"] == 6
+        assert [s["signature"] for s in shifted["signatures"]] == [1, 2]
+        assert shifted["signatures"][0]["sheets"][0]["sheet"] == 1
+        assert flatten_pages(shifted).count(BLANK) == 6
+
+
+def test_each_content_page_appears_exactly_once_with_start() -> None:
+    for start in (1, 2, 37, 500, 999_900):
+        for page_count in range(1, 49):
+            if start + page_count > MAX_PAGE_NUMBER_START:
+                continue
+            for sheets in ALLOWED_SHEETS_PER_SIGNATURE:
+                result = impose(page_count, sheets, page_number_start=start)
+                flat = flatten_pages(result)
+                content = [p for p in flat if isinstance(p, int)]
+                assert sorted(content) == list(
+                    range(start, start + page_count)
+                ), (start, page_count, sheets)
+                assert len(content) == len(set(content)) == page_count
+                assert flat.count(BLANK) == result["total_blanks"]
+                assert result["total_blanks"] == (-page_count) % (4 * sheets)
+
+
+def test_page_number_start_preserves_blanks_and_signature_layout() -> None:
+    # 把编号平移回 1 起始后，版面结构（BLANK 位置/帖张编号）必须与默认一致。
+    for page_count in (1, 5, 9, 10, 17, 33):
+        for sheets in ALLOWED_SHEETS_PER_SIGNATURE:
+            shifted = impose(page_count, sheets, page_number_start=37)
+            default = impose(page_count, sheets)
+            offset = 36
+            for sig_s, sig_d in zip(shifted["signatures"], default["signatures"]):
+                assert sig_s["signature"] == sig_d["signature"]
+                for sh_s, sh_d in zip(sig_s["sheets"], sig_d["sheets"]):
+                    assert sh_s["sheet"] == sh_d["sheet"]
+                    for side in ("front", "back"):
+                        for pos in ("left", "right"):
+                            got, want = sh_s[side][pos], sh_d[side][pos]
+                            if want == BLANK:
+                                assert got == BLANK
+                            else:
+                                assert got == want + offset
+
+
+def test_page_number_start_with_creep_strips_to_renumbered_default() -> None:
+    # 起点 + 补偿：剥除 creep_mm 后恰为仅指定起点的编排，补偿量本身不变。
+    for page_count in (1, 8, 10, 32):
+        compensated = impose(page_count, 4, 0.125, page_number_start=37)
+        for sig in compensated["signatures"]:
+            for sh in sig["sheets"]:
+                assert sh.pop("creep_mm") == round(
+                    0.25 * (sh["sheet"] - 1), 3
+                )
+        assert compensated == impose(page_count, 4, page_number_start=37)
+
+
+@pytest.mark.parametrize(
+    ("start", "page_count"),
+    [
+        (999_998, 1),          # 起点 + 页数恰为 999999，合法
+        (999_989, 10),         # 999989 + 10 = 999999
+        (997_999, MAX_PAGE_COUNT),
+        (2, MAX_PAGE_COUNT),   # 2..2001
+    ],
+)
+def test_page_number_start_upper_boundary_accepted(
+    start: int, page_count: int
+) -> None:
+    result = impose(page_count, 4, page_number_start=start)
+    flat = flatten_pages(result)
+    content = sorted(p for p in flat if isinstance(p, int))
+    assert content == list(range(start, start + page_count))
+    assert start + page_count <= MAX_PAGE_NUMBER_START
+
+
+@pytest.mark.parametrize(
+    ("start", "page_count"),
+    [
+        (999_999, 1),                        # 起点 + 页数 = 1000000，越界
+        (999_990, 10),                       # 同样为 1000000
+        (MAX_PAGE_NUMBER_START, 2),
+        (MAX_PAGE_NUMBER_START, MAX_PAGE_COUNT),
+    ],
+)
+def test_page_number_start_plus_count_overflow_raises(
+    start: int, page_count: int
+) -> None:
+    with pytest.raises(ValueError, match="page_number_start"):
+        impose(page_count, 2, page_number_start=start)
+
+
+@pytest.mark.parametrize("start", [0, -1, 1_000_000, 1_000_001])
+def test_page_number_start_out_of_range_raises(start: int) -> None:
+    with pytest.raises(ValueError):
+        impose(8, 2, page_number_start=start)
+
+
+@pytest.mark.parametrize("start", [True, False, "37", 37.0, 37.5, [37], {}, 1.0])
+def test_non_integer_page_number_start_raises(start: object) -> None:
+    with pytest.raises(ValueError):
+        impose(8, 2, page_number_start=start)  # type: ignore[arg-type]

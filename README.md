@@ -74,6 +74,28 @@
    | 1 | 1 | 1, 8 | 7, 2 |
    | 1 | 2 | 3, 6 | 5, 4 |
 
+8. （可选）传入 **正文页码起点 `page_number_start`**（1 至 999999 的
+   **严格整数**，缺省为 1）时，从长文档中截取章节制作样册可保留原文页码：
+   编排核心仍按 `page_count` 分帖、计算末尾补白，**只把正文页映射为从该
+   起点连续递增的编号**（`start .. start+page_count-1`）；`BLANK`、帖号、
+   张号与补白数均不受影响，响应结构不新增字段。**起点与正文页数相加**
+   （`page_number_start + page_count`）**不得超过 999999**，超过即整次
+   422（例如起点 999999 连 1 页也不允许；999989 配 10 页恰为上界）。与
+   右装订及纸厚补偿组合时，**先完成编号映射**，再执行既有镜像，
+   `creep_mm` 保持原补偿量。
+
+   例如 10 页、每帖 2 张、`page_number_start: 37`（末帖含 6 个补白）：
+
+   | 帖 | 张 | 正面 左→右 | 反面 左→右 |
+   |---:|---:|:-----------|:-----------|
+   | 1 | 1 | 44, 37 | 38, 43 |
+   | 1 | 2 | 42, 39 | 40, 41 |
+   | 2 | 1 | BLANK, 45 | 46, BLANK |
+   | 2 | 2 | BLANK, BLANK | BLANK, BLANK |
+
+   显式 `null`、布尔值（`true`/`false`）、字符串（`"37"`）、小数
+   （`37.0`、`37.5`）一律 422。
+
 ---
 
 ## 2. API
@@ -92,6 +114,7 @@
 | `sheets_per_signature` | 整数 | 仅允许 `1`、`2`、`3`、`4` |
 | `paper_thickness_mm` | 小数 | 可选。大于 `0` 且不超过 `1` 的**有限小数**；布尔值（`true`/`false`）、字符串（`"0.5"`）、显式 `null`、`0`、负数、`> 1`、`NaN`/`Infinity` 一律 422。整数 `1` 作为 JSON 数字被接受。**只有缺省该字段**才表示不做补偿。 |
 | `binding_edge` | 字符串 | 可选。仅接受 `"left"` 或 `"right"`；无法识别的值、非字符串（数字、布尔、数组、对象）与显式 `null` 一律 422。**只有缺省该字段**才表示左装订（与旧版本一致）。 |
+| `page_number_start` | 整数 | 可选。`1` ≤ 值 ≤ `999999` 的严格整数，缺省为 `1`。布尔值（`true`/`false`）、字符串（`"37"`）、小数（`37.0`、`37.5`）、显式 `null` 一律 422。另要求 `page_number_start + page_count ≤ 999999`，超出同样 422 且定位到本字段。 |
 
 多余字段同样拒绝（`extra="forbid"`）。
 
@@ -198,11 +221,46 @@ UTF-8 编码字节**时，同样在解析阶段返回 422。字段值中出现�
 > 缺省（或显式 `"left"`）时响应与旧版本完全一致，不出现 `binding_edge`
 > 字段；现有调用方无需调整解析逻辑。
 
+### 保留原文页码（`page_number_start`）
+
+请求增加 `page_number_start` 后，正文页编号整体平移为
+`start .. start+page_count-1`，分帖、补白、帖/张编号完全不变；响应结构
+不新增字段。10 页、每帖 2 张、`page_number_start: 37`（末帖含补白）：
+
+```json
+{
+  "page_count": 10,
+  "sheets_per_signature": 2,
+  "total_signatures": 2,
+  "total_blanks": 6,
+  "signatures": [
+    {
+      "signature": 1,
+      "sheets": [
+        {"sheet": 1, "front": {"left": 44, "right": 37}, "back": {"left": 38, "right": 43}},
+        {"sheet": 2, "front": {"left": 42, "right": 39}, "back": {"left": 40, "right": 41}}
+      ]
+    },
+    {
+      "signature": 2,
+      "sheets": [
+        {"sheet": 1, "front": {"left": "BLANK", "right": 45}, "back": {"left": 46, "right": "BLANK"}},
+        {"sheet": 2, "front": {"left": "BLANK", "right": "BLANK"}, "back": {"left": "BLANK", "right": "BLANK"}}
+      ]
+    }
+  ]
+}
+```
+
+> 缺省（或显式传 `1`）时响应与旧版本完全一致；与 `binding_edge: "right"`、
+> `paper_thickness_mm` 同时使用时，先完成编号映射再镜像，补偿量不变。
+
 ### 错误响应
 
 任何非法输入（页数越界、类型非整数、每帖张数不支持、纸张厚度为
 布尔/字符串/显式 `null`/零/负数/超限/非有限数、装订侧无法识别或非
-字符串、缺字段、多字段、非法 JSON、非法 UTF-8 编码、重复 JSON 字段、
+字符串、页码起点非严格整数/显式 `null`/越界或与正文页数相加上溢、
+缺字段、多字段、非法 JSON、非法 UTF-8 编码、重复 JSON 字段、
 未声明或声明错误的 `Content-Type`）**整次请求返回 HTTP 422**，响应体
 为 FastAPI 标准的 `detail` 错误数组，并定位到出错字段，例如：
 
@@ -258,6 +316,10 @@ curl -s -X POST http://localhost:8000/impose \
 curl -s -X POST http://localhost:8000/impose \
   -H 'content-type: application/json' \
   -d '{"page_count": 10, "sheets_per_signature": 2, "binding_edge": "right"}'
+# 保留原文页码（章节从原书第 37 页开始）：
+curl -s -X POST http://localhost:8000/impose \
+  -H 'content-type: application/json' \
+  -d '{"page_count": 10, "sheets_per_signature": 2, "page_number_start": 37}'
 ```
 
 ---
@@ -285,6 +347,10 @@ python -m pytest
   - 装订侧：右装订逐面镜像左右页位（含 `BLANK` 页位）、显式 `left`
     与缺省一致、右装订与补偿组合时 creep 不变、右装订下每页仍恰好一次；
     非法装订侧（无法识别的字符串、非字符串）抛错；
+  - 页码起点：起点 37 且末帖含补白的逐面页码、与右装订及补偿三项组合
+    （先映射再镜像、补偿量不变）、缺省/显式 1 与旧版本一致、平移后每个
+    正文页恰好一次且补白/帖张编号不变、边界 999999 与上溢、非严格整数
+    （含 `bool`、字符串、小数、`None`）抛错；
   - 核心函数对非法参数与非整数（含 `bool`、字符串、浮点、`None`）抛错。
 - `tests/test_api.py`：HTTP 层
   - 合法请求返回唯一页序；多组参数下每页恰好一次；
@@ -298,6 +364,11 @@ python -m pytest
   - 装订侧：右装订且末帖含补白的镜像结果、右装订与纸厚补偿组合、
     缺省请求快照不出现 `binding_edge`、显式 `left` 与缺省一致、
     非法装订侧 422 且定位到 `body.binding_edge`、右装订下每页仍恰好一次；
+  - 页码起点：起点 37 且末帖含补白的逐面页码、与右装订及补偿三项组合、
+    缺省/显式 1 的默认快照不变、多组组合下 `start..start+N-1` 每页恰好
+    一次、边界（999989+10=999999）与上溢（999990+10、999999+1）422 并
+    定位到 `body.page_number_start`、显式 null/布尔/字符串/小数 422 且
+    字段定位正确；
   - 响应结构稳定、BLANK 只在末尾。
 - `tests/conftest.py`：FastAPI `TestClient` 夹具。
 
@@ -314,7 +385,11 @@ python -m pytest
 `NaN`/`Infinity` token），以及装订侧专项：
 右装订且末帖含补白的镜像结果、右装订与纸厚补偿组合（creep 不变）、
 缺省请求快照不出现 `binding_edge`、显式 `left` 与缺省一致、
-右装订下每页仍恰好一次、非法装订侧 422 并定位到 `binding_edge`。
+右装订下每页仍恰好一次、非法装订侧 422 并定位到 `binding_edge`，以及
+页码起点专项：起点 37 且末帖含补白的逐面页码、与右装订及补偿三项组合
+（先映射再镜像、补偿量不变）、缺省/显式 1 快照不变、边界 999999 与
+多组组合下每个正文页恰好一次、非法起点（含显式 null、布尔、字符串、
+小数、上溢）422 并定位到 `page_number_start`。
 
 Compose 将其建模为一次性服务（`restart: "no"`，跑完即退出）：
 

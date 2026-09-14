@@ -528,3 +528,252 @@ def test_every_content_page_appears_exactly_once_with_right_binding(client) -> N
         assert sorted(content) == list(range(1, page_count + 1))
         assert len(content) == page_count
         assert flat.count("BLANK") == body["total_blanks"]
+
+
+# ===== page_number_start（正文页码起点）=====
+
+
+def test_page_number_start_37_per_side_pages_with_trailing_blanks(client) -> None:
+    # 固定核对：起点 37、10 页、每帖 2 张，末帖含 6 个补白。逐面核对页码，
+    # BLANK、帖/张编号与总补白数不受编号映射影响。
+    response = client.post(
+        "/impose",
+        json={
+            "page_count": 10,
+            "sheets_per_signature": 2,
+            "page_number_start": 37,
+        },
+    )
+    assert response.status_code == 200, response.text
+    body = response.json()
+    assert body["page_count"] == 10
+    assert body["total_signatures"] == 2
+    assert body["total_blanks"] == 6
+    assert [sig["signature"] for sig in body["signatures"]] == [1, 2]
+    assert [
+        (
+            sh["front"]["left"],
+            sh["front"]["right"],
+            sh["back"]["left"],
+            sh["back"]["right"],
+        )
+        for sig in body["signatures"]
+        for sh in sig["sheets"]
+    ] == [
+        (44, 37, 38, 43),
+        (42, 39, 40, 41),
+        ("BLANK", 45, 46, "BLANK"),
+        ("BLANK", "BLANK", "BLANK", "BLANK"),
+    ]
+    # 响应不新增与起点相关的字段，且不含 creep_mm。
+    assert "page_number_start" not in body
+    assert all(
+        "creep_mm" not in sh
+        for sig in body["signatures"]
+        for sh in sig["sheets"]
+    )
+
+
+def test_page_number_start_37_with_right_binding_and_creep(client) -> None:
+    # 三项功能组合：先完成编号映射，再执行既有镜像，creep 补偿量保持原样。
+    response = client.post(
+        "/impose",
+        json={
+            "page_count": 10,
+            "sheets_per_signature": 2,
+            "paper_thickness_mm": 0.125,
+            "binding_edge": "right",
+            "page_number_start": 37,
+        },
+    )
+    assert response.status_code == 200, response.text
+    body = response.json()
+    assert body["total_signatures"] == 2
+    assert body["total_blanks"] == 6
+    assert [
+        (
+            sh["front"]["left"],
+            sh["front"]["right"],
+            sh["back"]["left"],
+            sh["back"]["right"],
+        )
+        for sig in body["signatures"]
+        for sh in sig["sheets"]
+    ] == [
+        (37, 44, 43, 38),
+        (39, 42, 41, 40),
+        (45, "BLANK", "BLANK", 46),
+        ("BLANK", "BLANK", "BLANK", "BLANK"),
+    ]
+    assert [
+        [sh["creep_mm"] for sh in sig["sheets"]] for sig in body["signatures"]
+    ] == [[0.0, 0.25], [0.0, 0.25]]
+
+
+def test_page_number_start_default_snapshot_unchanged(client) -> None:
+    # 缺省该字段与显式 1 都与旧版本快照逐字节一致；响应不出现新字段。
+    default = client.post(
+        "/impose", json={"page_count": 8, "sheets_per_signature": 2}
+    ).json()
+    one = client.post(
+        "/impose",
+        json={"page_count": 8, "sheets_per_signature": 2, "page_number_start": 1},
+    )
+    assert one.status_code == 200
+    assert "page_number_start" not in default
+    assert one.json() == default
+    assert default == {
+        "page_count": 8,
+        "sheets_per_signature": 2,
+        "total_signatures": 1,
+        "total_blanks": 0,
+        "signatures": [
+            {
+                "signature": 1,
+                "sheets": [
+                    {
+                        "sheet": 1,
+                        "front": {"left": 8, "right": 1},
+                        "back": {"left": 2, "right": 7},
+                    },
+                    {
+                        "sheet": 2,
+                        "front": {"left": 6, "right": 3},
+                        "back": {"left": 4, "right": 5},
+                    },
+                ],
+            }
+        ],
+    }
+
+
+def test_every_content_page_appears_exactly_once_with_start(client) -> None:
+    for page_count, sheets in itertools.product(
+        [1, 2, 3, 7, 8, 9, 15, 16, 17, 100, 2000], [1, 2, 3, 4]
+    ):
+        start = 37
+        response = client.post(
+            "/impose",
+            json={
+                "page_count": page_count,
+                "sheets_per_signature": sheets,
+                "page_number_start": start,
+            },
+        )
+        assert response.status_code == 200, (page_count, sheets, response.text)
+        body = response.json()
+        flat = flatten_pages(body)
+        content = [p for p in flat if isinstance(p, int)]
+        # 指定范围内每个正文页（start..start+N-1）只出现一次。
+        assert sorted(content) == list(
+            range(start, start + page_count)
+        ), page_count
+        assert len(set(content)) == page_count
+        assert flat.count("BLANK") == body["total_blanks"]
+        # 补白、帖数仍只由 page_count 决定。
+        assert body["total_blanks"] == (-page_count) % (4 * sheets)
+        assert body["total_signatures"] == (
+            page_count + 4 * sheets - 1
+        ) // (4 * sheets)
+
+
+def test_page_number_start_boundaries_accepted(client) -> None:
+    # 起点 + 页数恰为 999999：接受；起点字段上界 999999 本身也可与 1 页组合
+    # 之外的合法值出现（此处锁定 999989 + 10 = 999999）。
+    response = client.post(
+        "/impose",
+        json={
+            "page_count": 10,
+            "sheets_per_signature": 2,
+            "page_number_start": 999_989,
+        },
+    )
+    assert response.status_code == 200, response.text
+    content = [p for p in flatten_pages(response.json()) if isinstance(p, int)]
+    assert sorted(content) == list(range(999_989, 999_999))
+
+
+@pytest.mark.parametrize(
+    ("page_count", "start"),
+    [
+        (10, 999_990),       # 999990 + 10 = 1000000
+        (1, 999_999),        # 起点本身合法，但与 1 页相加越界
+        (2000, 999_000),
+    ],
+)
+def test_page_number_start_plus_count_overflow_returns_422(
+    client, page_count: int, start: int
+) -> None:
+    response = client.post(
+        "/impose",
+        json={
+            "page_count": page_count,
+            "sheets_per_signature": 2,
+            "page_number_start": start,
+        },
+    )
+    assert response.status_code == 422, (start, response.text)
+    detail = response.json()["detail"]
+    assert any(
+        "".join(map(str, err["loc"])) == "bodypage_number_start"
+        for err in detail
+    ), detail
+
+
+@pytest.mark.parametrize(
+    "start",
+    [0, -1, 1_000_000, 1_000_001, None, True, False, "37", 37.0, 37.5, [], {}],
+)
+def test_invalid_page_number_start_returns_422_with_field_location(
+    client, start: object
+) -> None:
+    response = client.post(
+        "/impose",
+        json={
+            "page_count": 10,
+            "sheets_per_signature": 2,
+            "page_number_start": start,
+        },
+    )
+    assert response.status_code == 422, (start, response.text)
+    detail = response.json()["detail"]
+    assert isinstance(detail, list) and detail
+    assert any(
+        "".join(map(str, err["loc"])) == "bodypage_number_start"
+        for err in detail
+    ), detail
+
+
+def test_explicit_null_page_number_start_raw_json_returns_422(client) -> None:
+    # 显式 null 与缺省不同：必须整次拒绝并定位到 page_number_start。
+    response = client.post(
+        "/impose",
+        content=(
+            b'{"page_count": 10, "sheets_per_signature": 2, '
+            b'"page_number_start": null}'
+        ),
+        headers={"content-type": "application/json"},
+    )
+    assert response.status_code == 422, response.text
+    detail = response.json()["detail"]
+    assert any(
+        "".join(map(str, err["loc"])) == "bodypage_number_start"
+        for err in detail
+    ), detail
+
+
+def test_page_number_start_with_invalid_page_count_still_field_located(client) -> None:
+    # page_count 自身非法时优先报 page_count；组合上界检查不得产生
+    # 定位到模型根（loc 仅为 body）的额外错误。
+    response = client.post(
+        "/impose",
+        json={
+            "page_count": 0,
+            "sheets_per_signature": 2,
+            "page_number_start": 999_999,
+        },
+    )
+    assert response.status_code == 422
+    locs = ["".join(map(str, e["loc"])) for e in response.json()["detail"]]
+    assert "bodypage_count" in locs
+    assert all(loc.startswith("body") for loc in locs)

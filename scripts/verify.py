@@ -16,6 +16,11 @@
    creep 计算/舍入/跨帖归零保持原样；缺省请求响应快照不出现新字段；
    无法识别或非字符串的装订侧整次请求 422 且字段定位到 ``binding_edge``；
    右装订下每个正文页仍恰好出现一次。
+6. 可选 ``page_number_start``：起点 37 且末帖含补白时逐面页码正确；
+   与右装订、纸厚补偿三项组合时先映射再镜像、补偿量不变；缺省/显式 1
+   的默认快照与旧版本一致；越界反馈（0、超 999999、起点与正文页数相加
+   超 999999、显式 null、布尔、字符串、小数）一律 422 且定位到
+   ``page_number_start``；指定范围内每个正文页恰好出现一次。
 
 全部通过退出码为 0，任一失败退出码为 1。仅使用标准库，便于在
 slim 镜像中直接运行。
@@ -395,6 +400,207 @@ def main() -> int:
             isinstance(body.get("detail"), list)
             and any(
                 "".join(map(str, err.get("loc", []))) == "bodybinding_edge"
+                for err in body["detail"]
+            ),
+            str(body),
+        )
+
+    # ===== page_number_start（正文页码起点）验收 =====
+
+    # 固定场景一：起点 37、10 页、每帖 2 张，末帖含 6 个补白。逐面核对
+    # 页码：第一帖 37..44，末帖 45、46；BLANK、帖/张编号与总补白数不变。
+    status, body = request(
+        "POST",
+        "/impose",
+        {
+            "page_count": 10,
+            "sheets_per_signature": 2,
+            "page_number_start": 37,
+        },
+    )
+    check("起点 37（10 页 / 每帖 2 张）返回 200", status == 200, str(body))
+    check(
+        "起点 37：末帖含补白的逐面页码正确，补白/帖张编号不受影响",
+        body["total_signatures"] == 2
+        and body["total_blanks"] == 6
+        and [sig["signature"] for sig in body["signatures"]] == [1, 2]
+        and "page_number_start" not in body
+        and all(
+            "creep_mm" not in sh
+            for sig in body["signatures"]
+            for sh in sig["sheets"]
+        )
+        and [
+            (
+                sh["front"]["left"],
+                sh["front"]["right"],
+                sh["back"]["left"],
+                sh["back"]["right"],
+            )
+            for sig in body["signatures"]
+            for sh in sig["sheets"]
+        ]
+        == [
+            (44, 37, 38, 43),
+            (42, 39, 40, 41),
+            ("BLANK", 45, 46, "BLANK"),
+            ("BLANK", "BLANK", "BLANK", "BLANK"),
+        ],
+        str(body),
+    )
+
+    # 固定场景二：三项功能组合（起点 37 + 右装订 + 0.125mm 补偿）。
+    # 先完成编号映射，再执行既有镜像；creep 计算/舍入/跨帖归零保持原样。
+    status, body = request(
+        "POST",
+        "/impose",
+        {
+            "page_count": 10,
+            "sheets_per_signature": 2,
+            "paper_thickness_mm": 0.125,
+            "binding_edge": "right",
+            "page_number_start": 37,
+        },
+    )
+    check("起点 37 + 右装订 + 补偿返回 200", status == 200, str(body))
+    check(
+        "三项组合：先映射再镜像，逐面页码正确",
+        body["total_signatures"] == 2
+        and body["total_blanks"] == 6
+        and [
+            (
+                sh["front"]["left"],
+                sh["front"]["right"],
+                sh["back"]["left"],
+                sh["back"]["right"],
+            )
+            for sig in body["signatures"]
+            for sh in sig["sheets"]
+        ]
+        == [
+            (37, 44, 43, 38),
+            (39, 42, 41, 40),
+            (45, "BLANK", "BLANK", 46),
+            ("BLANK", "BLANK", "BLANK", "BLANK"),
+        ],
+        str(body),
+    )
+    check(
+        "三项组合：creep 补偿量保持原样且跨帖归零",
+        [
+            [sh["creep_mm"] for sh in sig["sheets"]]
+            for sig in body["signatures"]
+        ]
+        == [[0.0, 0.25], [0.0, 0.25]],
+        str(body),
+    )
+
+    # 固定场景三：缺省/显式 1 的默认快照与旧版本逐字段一致。
+    status, body_default = request(
+        "POST",
+        "/impose",
+        {"page_count": 8, "sheets_per_signature": 2},
+    )
+    status_one, body_one = request(
+        "POST",
+        "/impose",
+        {"page_count": 8, "sheets_per_signature": 2, "page_number_start": 1},
+    )
+    check(
+        "起点缺省与显式 1 均等于旧版本快照",
+        status == 200
+        and status_one == 200
+        and body_default == SNAPSHOT_8_PAGES_2_SHEETS
+        and body_one == SNAPSHOT_8_PAGES_2_SHEETS
+        and "page_number_start" not in body_default,
+        str(body_default),
+    )
+
+    # 上界：起点 + 页数恰为 999999 接受，且每个正文页恰好出现一次。
+    status, body = request(
+        "POST",
+        "/impose",
+        {"page_count": 10, "sheets_per_signature": 2, "page_number_start": 999_989},
+    )
+    check("起点 999989 + 10 页（末页 999999）返回 200", status == 200, str(body))
+    flat = flatten(body)
+    content = [p for p in flat if isinstance(p, int)]
+    check(
+        "边界：999989..999998 区间内每个正文页恰好出现一次（起点 + 页数 = 999999）",
+        sorted(content) == list(range(999_989, 999_999))
+        and len(set(content)) == 10,
+        str(content),
+    )
+
+    # 指定范围内每个正文页只出现一次：多组页数 × 每帖张数 × 若干起点。
+    for page_count, sheets in product(
+        [1, 2, 3, 7, 8, 9, 16, 17, 100, 2000], [1, 2, 3, 4]
+    ):
+        for start in (1, 2, 37, 500):
+            status, body = request(
+                "POST",
+                "/impose",
+                {
+                    "page_count": page_count,
+                    "sheets_per_signature": sheets,
+                    "page_number_start": start,
+                },
+            )
+            check(
+                f"起点 {start}：{page_count} 页 / 每帖 {sheets} 张返回 200",
+                status == 200,
+                str(body),
+            )
+            flat = flatten(body)
+            content = [p for p in flat if isinstance(p, int)]
+            expected = list(range(start, start + page_count))
+            check(
+                f"起点 {start}：{page_count} 页每个正文页恰好出现一次",
+                sorted(content) == expected
+                and len(set(content)) == page_count,
+                f"got {sorted(content)[:5]}...",
+            )
+            check(
+                f"起点 {start}：{page_count} 页补白数只由 page_count 决定",
+                body["total_blanks"] == (-page_count) % (4 * sheets)
+                and flat.count("BLANK") == body["total_blanks"],
+            )
+
+    # 越界反馈：0、负、超 999999、起点与正文页数相加上溢、显式 null、
+    # 布尔、字符串、小数（含 37.0）一律 422，且错误定位到 page_number_start。
+    invalid_starts = [
+        0,
+        -1,
+        1_000_000,
+        1_000_001,
+        999_990,   # 999990 + 10 = 1000000
+        999_999,   # 999999 + 10 上溢
+        None,
+        True,
+        False,
+        "37",
+        "1",
+        37.0,
+        37.5,
+        [],
+        {},
+    ]
+    for start in invalid_starts:
+        status, body = request(
+            "POST",
+            "/impose",
+            {
+                "page_count": 10,
+                "sheets_per_signature": 2,
+                "page_number_start": start,
+            },
+        )
+        check(f"非法起点 {start!r} 返回 422", status == 422, f"got {status}")
+        check(
+            f"非法起点 {start!r} 定位到 page_number_start",
+            isinstance(body.get("detail"), list)
+            and any(
+                "".join(map(str, err.get("loc", []))) == "bodypage_number_start"
                 for err in body["detail"]
             ),
             str(body),

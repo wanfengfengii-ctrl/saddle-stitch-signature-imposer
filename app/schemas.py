@@ -10,6 +10,11 @@
 ``"left"``（左装订，页序与旧版本一致）；选择 ``"right"`` 时，每张纸正
 反面的左右页位水平镜像。响应结构不新增字段，缺省请求的响应快照与旧版本
 完全一致。
+
+``page_number_start`` 为可选字段：接受 1 至 999999 的严格整数，缺省从
+1 开始。只做正文页编号映射；与右装订及纸厚补偿组合时由编排核心先完成
+编号映射再镜像。显式 ``null``、布尔值、字符串、小数一律 422；起点与
+正文页数相加超过 999999 同样 422，错误一律定位到该字段。
 """
 
 import math
@@ -19,6 +24,7 @@ from pydantic import (
     BaseModel,
     ConfigDict,
     Field,
+    ValidationInfo,
     field_validator,
     model_serializer,
 )
@@ -26,8 +32,10 @@ from pydantic import (
 from .imposition import (
     ALLOWED_SHEETS_PER_SIGNATURE,
     MAX_PAGE_COUNT,
+    MAX_PAGE_NUMBER_START,
     MAX_PAPER_THICKNESS_MM,
     MIN_PAGE_COUNT,
+    MIN_PAGE_NUMBER_START,
     MIN_PAPER_THICKNESS_MM,
 )
 
@@ -44,6 +52,9 @@ class ImpositionRequest(BaseModel):
     只有**缺省该字段**才表示不做 creep 补偿。
     ``binding_edge`` 仅接受 ``"left"`` 或 ``"right"``：无法识别的值、非
     字符串与显式 ``null`` 均被拒绝；只有**缺省该字段**才表示左装订。
+    ``page_number_start`` 使用 strict 整数校验并限制在 1..999999：布尔、
+    字符串、小数与显式 ``null`` 均被拒绝；起点与正文页数相加上溢同样
+    422。只有**缺省该字段**才表示从 1 开始。
     """
 
     model_config = ConfigDict(extra="forbid")
@@ -85,6 +96,24 @@ class ImpositionRequest(BaseModel):
             "422；显式传 null 视为无效，整次请求返回 422。"
         ),
     )
+    page_number_start: Optional[
+        Annotated[
+            int,
+            Field(
+                strict=True,
+                ge=MIN_PAGE_NUMBER_START,
+                le=MAX_PAGE_NUMBER_START,
+                description=(
+                    "可选正文页码起点，严格整数，范围 "
+                    f"{MIN_PAGE_NUMBER_START}–{MAX_PAGE_NUMBER_START}，"
+                    "缺省从 1 开始。只把正文页映射为从该起点连续递增的编号；"
+                    "BLANK、帖张编号与补白数不受影响。显式 null、布尔值、"
+                    "字符串、小数一律 422；起点与正文页数相加超过 "
+                    f"{MAX_PAGE_NUMBER_START} 同样 422。"
+                ),
+            ),
+        ]
+    ] = None
 
     @field_validator("binding_edge")
     @classmethod
@@ -95,6 +124,31 @@ class ImpositionRequest(BaseModel):
                 "binding_edge must not be null; omit the field to keep "
                 "left binding"
             )
+        return value
+
+    @field_validator("page_number_start")
+    @classmethod
+    def validate_page_number_start(
+        cls, value: Optional[int], info: ValidationInfo
+    ) -> Optional[int]:
+        # 与其他可选字段一致：缺省 = 默认（从 1 开始），显式 null 必须拒绝。
+        # 布尔值、字符串、小数已由 strict 整数 + 范围校验拒绝；这里只兜底
+        # 显式 null，并把错误定位到 page_number_start。
+        if value is None:
+            raise ValueError(
+                "page_number_start must not be null; omit the field to "
+                "start numbering at 1"
+            )
+        # 跨字段上界也在字段校验器内检查：page_count 先于本字段声明，合法时
+        # 已出现在 info.data 中；抛错天然定位到 page_number_start。若
+        # page_count 自身非法，它已经产生自己的错误，此处跳过组合检查。
+        page_count = info.data.get("page_count")
+        if isinstance(page_count, int) and not isinstance(page_count, bool):
+            if value + page_count > MAX_PAGE_NUMBER_START:
+                raise ValueError(
+                    "page_number_start + page_count must not exceed "
+                    f"{MAX_PAGE_NUMBER_START}; got {value} + {page_count}"
+                )
         return value
 
     @field_validator("paper_thickness_mm")
